@@ -62,23 +62,24 @@ pub struct ThemeColors {
 impl ThemeColors {
     pub fn classic() -> Self {
         Self {
-            screen_bg: PackedRgba::rgb(0, 0, 128),
-            menu_bg: PackedRgba::rgb(0, 128, 128),
-            menu_fg: PackedRgba::rgb(255, 255, 255),
-            panel_bg: PackedRgba::rgb(0, 0, 128),
-            panel_fg: PackedRgba::rgb(192, 192, 192),
-            system_fg: PackedRgba::rgb(128, 128, 128),
-            panel_border_active: PackedRgba::rgb(0, 255, 255),
-            panel_border_inactive: PackedRgba::rgb(128, 128, 128),
-            header_bg: PackedRgba::rgb(0, 0, 128),
+            // Approximate VGA 16-color palette (NC 5.0 era)
+            screen_bg: PackedRgba::rgb(0, 0, 170),        // dark blue
+            menu_bg: PackedRgba::rgb(0, 170, 170),        // cyan
+            menu_fg: PackedRgba::rgb(255, 255, 255),      // bright white
+            panel_bg: PackedRgba::rgb(0, 0, 170),         // dark blue
+            panel_fg: PackedRgba::rgb(170, 170, 170),     // light gray
+            system_fg: PackedRgba::rgb(85, 85, 85),       // dark gray
+            panel_border_active: PackedRgba::rgb(85, 255, 255), // bright cyan
+            panel_border_inactive: PackedRgba::rgb(85, 85, 85), // dark gray
+            header_bg: PackedRgba::rgb(0, 0, 170),
             header_fg: PackedRgba::rgb(255, 255, 255),
-            selection_bg: PackedRgba::rgb(255, 255, 0),
-            selection_fg: PackedRgba::rgb(0, 0, 0),
-            keybar_bg: PackedRgba::rgb(0, 128, 128),
+            selection_bg: PackedRgba::rgb(170, 170, 0),   // yellow
+            selection_fg: PackedRgba::rgb(0, 0, 0),       // black
+            keybar_bg: PackedRgba::rgb(0, 170, 170),
             keybar_fg: PackedRgba::rgb(255, 255, 255),
-            status_bg: PackedRgba::rgb(0, 0, 128),
+            status_bg: PackedRgba::rgb(0, 0, 170),
             status_fg: PackedRgba::rgb(255, 255, 255),
-            dialog_bg: PackedRgba::rgb(192, 192, 192),
+            dialog_bg: PackedRgba::rgb(170, 170, 170),    // light gray
             dialog_fg: PackedRgba::rgb(0, 0, 0),
         }
     }
