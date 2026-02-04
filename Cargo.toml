@@ -1,0 +1,10 @@
+[package]
+name = "frankencommander"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ftui = { git = "https://github.com/Dicklesworthstone/frankentui.git", branch = "main" }
+time = { version = "0.3", features = ["local-offset", "formatting"] }
+crossterm = "0.29"
+zip = "2.2"
