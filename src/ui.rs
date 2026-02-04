@@ -314,7 +314,7 @@ pub fn render_panel(
                 row = row.style(Style::new().fg(theme.system_fg).bg(theme.panel_bg));
             }
             if is_marked {
-                row = row.style(Style::new().fg(theme.selection_fg).bg(theme.panel_bg));
+                row = row.style(Style::new().fg(theme.selection_bg).bg(theme.panel_bg));
             }
             row
         })
