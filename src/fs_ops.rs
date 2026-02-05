@@ -44,8 +44,13 @@ pub fn read_entries(
         match sort_mode {
             SortMode::NameAsc => cmp_name(a, b),
             SortMode::NameDesc => cmp_name(b, a),
+            SortMode::ExtAsc => cmp_ext(a, b).then_with(|| cmp_name(a, b)),
+            SortMode::ExtDesc => cmp_ext(b, a).then_with(|| cmp_name(a, b)),
             SortMode::TimeAsc => cmp_time(a, b).then_with(|| cmp_name(a, b)),
             SortMode::TimeDesc => cmp_time(b, a).then_with(|| cmp_name(a, b)),
+            SortMode::SizeAsc => cmp_size(a, b).then_with(|| cmp_name(a, b)),
+            SortMode::SizeDesc => cmp_size(b, a).then_with(|| cmp_name(a, b)),
+            SortMode::Unsorted => Ordering::Equal,
         }
     });
 
@@ -77,17 +82,35 @@ pub fn cmp_name(a: &Entry, b: &Entry) -> Ordering {
     a.name.to_lowercase().cmp(&b.name.to_lowercase())
 }
 
+pub fn cmp_ext(a: &Entry, b: &Entry) -> Ordering {
+    let ext_a = a.name.rsplit('.').next().unwrap_or("").to_lowercase();
+    let ext_b = b.name.rsplit('.').next().unwrap_or("").to_lowercase();
+    ext_a.cmp(&ext_b)
+}
+
 pub fn cmp_time(a: &Entry, b: &Entry) -> Ordering {
     let a_time = a.modified.unwrap_or(SystemTime::UNIX_EPOCH);
     let b_time = b.modified.unwrap_or(SystemTime::UNIX_EPOCH);
     a_time.cmp(&b_time)
 }
 
+pub fn cmp_size(a: &Entry, b: &Entry) -> Ordering {
+    a.size.cmp(&b.size)
+}
+
 pub fn toggle_name_sort(mode: SortMode) -> SortMode {
     match mode {
         SortMode::NameAsc => SortMode::NameDesc,
         SortMode::NameDesc => SortMode::NameAsc,
-        SortMode::TimeAsc | SortMode::TimeDesc => SortMode::NameAsc,
+        _ => SortMode::NameAsc,
+    }
+}
+
+pub fn toggle_ext_sort(mode: SortMode) -> SortMode {
+    match mode {
+        SortMode::ExtAsc => SortMode::ExtDesc,
+        SortMode::ExtDesc => SortMode::ExtAsc,
+        _ => SortMode::ExtAsc,
     }
 }
 
@@ -95,16 +118,37 @@ pub fn toggle_time_sort(mode: SortMode) -> SortMode {
     match mode {
         SortMode::TimeAsc => SortMode::TimeDesc,
         SortMode::TimeDesc => SortMode::TimeAsc,
-        SortMode::NameAsc | SortMode::NameDesc => SortMode::TimeDesc,
+        _ => SortMode::TimeDesc,
+    }
+}
+
+pub fn toggle_size_sort(mode: SortMode) -> SortMode {
+    match mode {
+        SortMode::SizeAsc => SortMode::SizeDesc,
+        SortMode::SizeDesc => SortMode::SizeAsc,
+        _ => SortMode::SizeDesc,
     }
 }
 
 pub fn sort_label(mode: SortMode) -> &'static str {
     match mode {
-        SortMode::NameAsc => "Name Asc",
-        SortMode::NameDesc => "Name Desc",
-        SortMode::TimeAsc => "Time Asc",
-        SortMode::TimeDesc => "Time Desc",
+        SortMode::NameAsc => "Name ↑",
+        SortMode::NameDesc => "Name ↓",
+        SortMode::ExtAsc => "Ext ↑",
+        SortMode::ExtDesc => "Ext ↓",
+        SortMode::TimeAsc => "Time ↑",
+        SortMode::TimeDesc => "Time ↓",
+        SortMode::SizeAsc => "Size ↑",
+        SortMode::SizeDesc => "Size ↓",
+        SortMode::Unsorted => "Unsorted",
+    }
+}
+
+pub fn sort_indicator(mode: SortMode) -> &'static str {
+    match mode {
+        SortMode::NameAsc | SortMode::ExtAsc | SortMode::TimeAsc | SortMode::SizeAsc => "↑",
+        SortMode::NameDesc | SortMode::ExtDesc | SortMode::TimeDesc | SortMode::SizeDesc => "↓",
+        SortMode::Unsorted => "",
     }
 }
 

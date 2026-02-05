@@ -22,13 +22,14 @@ use time::OffsetDateTime;
 
 use crate::fs_ops::{
     build_tree, copy_sources, find_conflicts, find_matches, list_drive_roots, load_user_menu,
-    move_sources, read_file_lines, sync_execute, sync_plan, toggle_name_sort, toggle_time_sort,
-    user_menu_path, ensure_user_menu_file,
+    move_sources, read_file_lines, sync_execute, sync_plan, toggle_ext_sort, toggle_name_sort,
+    toggle_size_sort, toggle_time_sort, user_menu_path, ensure_user_menu_file,
 };
 use crate::menu::{menu_items, MENU_TITLES};
 use crate::model::{
-    ActivePane, ClickInfo, LayoutCache, MenuAction, Modal, OverwriteKind, Pane, PendingConfirm,
-    PendingPrompt, RefreshMode, SortMode, Viewer, ViewerAction, VfsState,
+    ActivePane, ClickInfo, CopyDialogFocus, CopyDialogState, LayoutCache, MenuAction, Modal,
+    OverwriteKind, Pane, PanelMode, PendingConfirm, PendingPrompt, RefreshMode, SortMode, Viewer,
+    ViewerAction, VfsState,
 };
 use crate::ui::{
     render_background, render_layout, render_modal_wrapper, render_status_and_keybar, render_viewer,
@@ -116,6 +117,8 @@ pub struct App {
     hide_all: bool,
     cmdline: String,
     cmd_cursor: usize,
+    quick_search: Option<String>,
+    quick_search_time: Option<Instant>,
 }
 
 impl App {
@@ -152,6 +155,8 @@ impl App {
             hide_all: false,
             cmdline: String::new(),
             cmd_cursor: 0,
+            quick_search: None,
+            quick_search_time: None,
         })
     }
 
@@ -297,27 +302,34 @@ impl App {
             self.status = "No file selected".to_string();
             return;
         }
+        let source_name = if sources.len() == 1 {
+            self.active_pane()
+                .selected_entry()
+                .map(|e| e.name.clone())
+                .unwrap_or_default()
+        } else {
+            format!("{} files", sources.len())
+        };
         let dest_dir = self.inactive_pane_mut().cwd.clone();
-        let default = if sources.len() == 1 {
+        let dest = if sources.len() == 1 {
             dest_dir
-                .join(
-                    self.active_pane()
-                        .selected_entry()
-                        .map(|e| e.name.as_str())
-                        .unwrap_or(""),
-                )
+                .join(&source_name)
                 .display()
                 .to_string()
         } else {
             dest_dir.display().to_string()
         };
-        self.modal = Some(Modal::Prompt {
-            title: "Copy".to_string(),
-            label: "Copy to:".to_string(),
-            value: default.clone(),
-            cursor: default.len(),
-            action: PendingPrompt::CopyTo { sources },
-        });
+        self.modal = Some(Modal::CopyDialog(CopyDialogState {
+            sources,
+            source_name,
+            dest: dest.clone(),
+            cursor: dest.len(),
+            include_subdirs: false,
+            copy_newer_only: false,
+            use_filters: false,
+            check_target_space: false,
+            focus: CopyDialogFocus::Input,
+        }));
     }
 
     fn begin_move(&mut self) {
@@ -330,22 +342,31 @@ impl App {
             self.status = "No file selected".to_string();
             return;
         }
+        let source_name = if sources.len() == 1 {
+            sources[0].file_name().unwrap_or_default().to_string_lossy().to_string()
+        } else {
+            format!("{} files", sources.len())
+        };
         let dest_dir = self.inactive_pane_mut().cwd.clone();
-        let default = if sources.len() == 1 {
+        let dest = if sources.len() == 1 {
             dest_dir
-                .join(sources[0].file_name().unwrap_or_default())
+                .join(&source_name)
                 .display()
                 .to_string()
         } else {
             dest_dir.display().to_string()
         };
-        self.modal = Some(Modal::Prompt {
-            title: "Move/Rename".to_string(),
-            label: "To:".to_string(),
-            value: default.clone(),
-            cursor: default.len(),
-            action: PendingPrompt::MoveTo { sources },
-        });
+        self.modal = Some(Modal::MoveDialog(CopyDialogState {
+            sources,
+            source_name,
+            dest: dest.clone(),
+            cursor: dest.len(),
+            include_subdirs: false,
+            copy_newer_only: false,
+            use_filters: false,
+            check_target_space: false,
+            focus: CopyDialogFocus::Input,
+        }));
     }
 
     fn begin_mkdir(&mut self) {
@@ -374,11 +395,19 @@ impl App {
             self.status = "No file selected".to_string();
             return;
         }
-        let message = format!("Delete {} item(s)?", sources.len());
-        self.modal = Some(Modal::Confirm {
-            title: "Delete".to_string(),
-            message,
-            action: PendingConfirm::Delete { sources },
+        let source_name = if sources.len() == 1 {
+            self.active_pane()
+                .selected_entry()
+                .map(|e| e.name.clone())
+                .unwrap_or_default()
+        } else {
+            format!("{} files", sources.len())
+        };
+        self.modal = Some(Modal::DeleteDialog {
+            sources,
+            source_name,
+            use_filters: false,
+            focus: 1, // Focus on Delete button
         });
     }
 
@@ -563,7 +592,20 @@ impl App {
             KeyCode::F(8) if key.modifiers.contains(Modifiers::CTRL) => {
                 self.begin_sync_dirs();
             }
-            KeyCode::F(1) => self.modal = Some(Modal::Help),
+            // Panel mode switching (Ctrl+1 Brief, Ctrl+2 Full, Ctrl+3 Info, Ctrl+4 QuickView)
+            KeyCode::Char('1') if key.modifiers.contains(Modifiers::CTRL) => {
+                self.active_pane_mut().mode = PanelMode::Brief;
+            }
+            KeyCode::Char('2') if key.modifiers.contains(Modifiers::CTRL) => {
+                self.active_pane_mut().mode = PanelMode::Full;
+            }
+            KeyCode::Char('3') if key.modifiers.contains(Modifiers::CTRL) => {
+                self.active_pane_mut().mode = PanelMode::Info;
+            }
+            KeyCode::Char('4') if key.modifiers.contains(Modifiers::CTRL) => {
+                self.active_pane_mut().mode = PanelMode::QuickView;
+            }
+            KeyCode::F(1) => self.modal = Some(Modal::Help { page: 0, scroll: 0 }),
             KeyCode::F(2) => self.open_user_menu(),
             KeyCode::F(9) => self.modal = Some(Modal::PullDown { menu_idx: 0, item_idx: 0 }),
             KeyCode::F(10) => return Cmd::quit(),
@@ -579,10 +621,31 @@ impl App {
             KeyCode::Down => self.active_pane_mut().move_selection(1, view_height),
             KeyCode::PageUp => self.active_pane_mut().move_selection(-(view_height as i32), view_height),
             KeyCode::PageDown => self.active_pane_mut().move_selection(view_height as i32, view_height),
-            KeyCode::Left | KeyCode::Backspace => {
+            KeyCode::Left => {
                 let show_hidden = self.show_hidden;
                 if let Err(err) = self.active_pane_mut().go_parent(show_hidden) {
                     self.status = format!("Up failed: {err}");
+                }
+            }
+            KeyCode::Backspace => {
+                // If quick search is active, remove last character
+                if let Some(ref mut qs) = self.quick_search {
+                    qs.pop();
+                    if qs.is_empty() {
+                        self.quick_search = None;
+                        self.quick_search_time = None;
+                        self.status = "Ready".to_string();
+                    } else {
+                        self.quick_search_time = Some(Instant::now());
+                        self.status = format!("Quick search: {}", qs);
+                        self.do_quick_search();
+                    }
+                } else {
+                    // Go to parent directory
+                    let show_hidden = self.show_hidden;
+                    if let Err(err) = self.active_pane_mut().go_parent(show_hidden) {
+                        self.status = format!("Up failed: {err}");
+                    }
                 }
             }
             KeyCode::Right | KeyCode::Enter => {
@@ -608,19 +671,100 @@ impl App {
             KeyCode::Char('+') => self.active_pane_mut().select_all(),
             KeyCode::Char('-') => self.active_pane_mut().clear_selection(),
             KeyCode::Char('*') => self.active_pane_mut().invert_selection(),
+            KeyCode::Escape => {
+                // Clear quick search on Escape
+                if self.quick_search.is_some() {
+                    self.quick_search = None;
+                    self.quick_search_time = None;
+                    self.status = "Ready".to_string();
+                }
+            }
+            KeyCode::Char(ch) if ch.is_alphanumeric() || ch == '.' || ch == '_' => {
+                // Quick search: typing characters jumps to matching file
+                if !key.modifiers.contains(Modifiers::CTRL) && !key.modifiers.contains(Modifiers::ALT) {
+                    self.handle_quick_search_char(ch);
+                }
+            }
             _ => {}
         }
 
         Cmd::none()
     }
 
+    fn handle_quick_search_char(&mut self, ch: char) {
+        const QUICK_SEARCH_TIMEOUT_MS: u64 = 1500;
+
+        // Reset search if too much time has passed
+        if let Some(last_time) = self.quick_search_time {
+            if last_time.elapsed() > Duration::from_millis(QUICK_SEARCH_TIMEOUT_MS) {
+                self.quick_search = None;
+            }
+        }
+
+        // Append character to search string
+        let search = self.quick_search.get_or_insert_with(String::new);
+        search.push(ch.to_ascii_lowercase());
+        self.quick_search_time = Some(Instant::now());
+        self.status = format!("Quick search: {}", search);
+
+        self.do_quick_search();
+    }
+
+    fn do_quick_search(&mut self) {
+        let search = match &self.quick_search {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let view_height = self.list_height(self.active);
+        let pane = self.active_pane_mut();
+
+        // Find first entry starting with the search string
+        for (idx, entry) in pane.entries.iter().enumerate() {
+            if entry.name.to_lowercase().starts_with(&search) {
+                let mut state = pane.state.borrow_mut();
+                state.select(Some(idx));
+                ensure_visible(&mut state, view_height);
+                return;
+            }
+        }
+    }
+
     fn handle_modal_key(&mut self, key: KeyEvent, mut modal: Modal) -> Cmd<Msg> {
         match &mut modal {
-            Modal::Help => {
-                if matches!(key.code, KeyCode::Escape | KeyCode::Enter | KeyCode::F(10)) {
-                    self.modal = None;
-                } else {
-                    self.modal = Some(modal);
+            Modal::Help { page, scroll } => {
+                match key.code {
+                    KeyCode::Escape | KeyCode::F(10) => self.modal = None,
+                    KeyCode::Left => {
+                        if *page > 0 {
+                            *page -= 1;
+                            *scroll = 0;
+                        }
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::Right => {
+                        if *page < 3 {
+                            *page += 1;
+                            *scroll = 0;
+                        }
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::Up => {
+                        *scroll = scroll.saturating_sub(1);
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::Down => {
+                        *scroll += 1;
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::PageUp => {
+                        *scroll = scroll.saturating_sub(5);
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::PageDown => {
+                        *scroll += 5;
+                        self.modal = Some(modal);
+                    }
+                    _ => self.modal = Some(modal),
                 }
             }
             Modal::About => {
@@ -630,9 +774,28 @@ impl App {
                     self.modal = Some(modal);
                 }
             }
-            Modal::Config { selected, show_hidden } => {
+            Modal::Config { page, selected, show_hidden, auto_save, confirm_delete, confirm_overwrite } => {
+                let items_per_page = match *page {
+                    0 => 1,  // Screen page: show_hidden
+                    1 => 2,  // Confirmations: confirm_delete, confirm_overwrite
+                    _ => 1,
+                };
                 match key.code {
                     KeyCode::Escape | KeyCode::F(10) => self.modal = None,
+                    KeyCode::Left => {
+                        if *page > 0 {
+                            *page -= 1;
+                            *selected = 0;
+                        }
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::Right => {
+                        if *page < 2 {
+                            *page += 1;
+                            *selected = 0;
+                        }
+                        self.modal = Some(modal);
+                    }
                     KeyCode::Up => {
                         if *selected > 0 {
                             *selected -= 1;
@@ -640,17 +803,23 @@ impl App {
                         self.modal = Some(modal);
                     }
                     KeyCode::Down => {
-                        if *selected + 1 < 1 {
+                        if *selected + 1 < items_per_page {
                             *selected += 1;
                         }
                         self.modal = Some(modal);
                     }
-                    KeyCode::Enter => {
-                        if *selected == 0 {
-                            self.show_hidden = !self.show_hidden;
-                            let _ = self.left.refresh(RefreshMode::Keep, self.show_hidden);
-                            let _ = self.right.refresh(RefreshMode::Keep, self.show_hidden);
-                            *show_hidden = self.show_hidden;
+                    KeyCode::Char(' ') | KeyCode::Enter => {
+                        match (*page, *selected) {
+                            (0, 0) => {
+                                self.show_hidden = !self.show_hidden;
+                                *show_hidden = self.show_hidden;
+                                let _ = self.left.refresh(RefreshMode::Keep, self.show_hidden);
+                                let _ = self.right.refresh(RefreshMode::Keep, self.show_hidden);
+                            }
+                            (1, 0) => *confirm_delete = !*confirm_delete,
+                            (1, 1) => *confirm_overwrite = !*confirm_overwrite,
+                            (2, 0) => *auto_save = !*auto_save,
+                            _ => {}
                         }
                         self.modal = Some(modal);
                     }
@@ -686,9 +855,14 @@ impl App {
                             1 => {
                                 target.sort_mode = match target.sort_mode {
                                     SortMode::NameAsc => SortMode::NameDesc,
-                                    SortMode::NameDesc => SortMode::TimeDesc,
-                                    SortMode::TimeDesc => SortMode::TimeAsc,
-                                    SortMode::TimeAsc => SortMode::NameAsc,
+                                    SortMode::NameDesc => SortMode::ExtAsc,
+                                    SortMode::ExtAsc => SortMode::ExtDesc,
+                                    SortMode::ExtDesc => SortMode::TimeAsc,
+                                    SortMode::TimeAsc => SortMode::TimeDesc,
+                                    SortMode::TimeDesc => SortMode::SizeAsc,
+                                    SortMode::SizeAsc => SortMode::SizeDesc,
+                                    SortMode::SizeDesc => SortMode::Unsorted,
+                                    SortMode::Unsorted => SortMode::NameAsc,
                                 };
                                 *sort_mode = target.sort_mode;
                             }
@@ -802,7 +976,14 @@ impl App {
                                     return Cmd::none();
                                 }
                                 MenuAction::Config => {
-                                    self.modal = Some(Modal::Config { selected: 0, show_hidden: self.show_hidden });
+                                    self.modal = Some(Modal::Config {
+                                        page: 0,
+                                        selected: 0,
+                                        show_hidden: self.show_hidden,
+                                        auto_save: false,
+                                        confirm_delete: true,
+                                        confirm_overwrite: true,
+                                    });
                                     return Cmd::none();
                                 }
                                 MenuAction::PanelOptions => {
@@ -814,24 +995,116 @@ impl App {
                                     });
                                     return Cmd::none();
                                 }
+                                // Left panel view modes
+                                MenuAction::LeftBrief => {
+                                    self.left.mode = PanelMode::Brief;
+                                }
+                                MenuAction::LeftFull => {
+                                    self.left.mode = PanelMode::Full;
+                                }
+                                MenuAction::LeftInfo => {
+                                    self.left.mode = PanelMode::Info;
+                                }
+                                MenuAction::LeftTree => {
+                                    self.left.mode = PanelMode::Tree;
+                                }
+                                MenuAction::LeftQuickView => {
+                                    self.left.mode = PanelMode::QuickView;
+                                }
+                                MenuAction::LeftOnOff => {
+                                    self.hide_left = !self.hide_left;
+                                    if self.hide_left && self.active == ActivePane::Left {
+                                        self.active = ActivePane::Right;
+                                    }
+                                }
+                                // Left panel sort modes
                                 MenuAction::LeftSortName => {
                                     self.left.sort_mode = toggle_name_sort(self.left.sort_mode);
+                                    let _ = self.left.refresh(RefreshMode::Keep, self.show_hidden);
+                                }
+                                MenuAction::LeftSortExt => {
+                                    self.left.sort_mode = toggle_ext_sort(self.left.sort_mode);
                                     let _ = self.left.refresh(RefreshMode::Keep, self.show_hidden);
                                 }
                                 MenuAction::LeftSortTime => {
                                     self.left.sort_mode = toggle_time_sort(self.left.sort_mode);
                                     let _ = self.left.refresh(RefreshMode::Keep, self.show_hidden);
                                 }
+                                MenuAction::LeftSortSize => {
+                                    self.left.sort_mode = toggle_size_sort(self.left.sort_mode);
+                                    let _ = self.left.refresh(RefreshMode::Keep, self.show_hidden);
+                                }
+                                MenuAction::LeftUnsorted => {
+                                    self.left.sort_mode = SortMode::Unsorted;
+                                    let _ = self.left.refresh(RefreshMode::Keep, self.show_hidden);
+                                }
+                                // Left panel other actions
+                                MenuAction::LeftReread => {
+                                    let _ = self.left.refresh(RefreshMode::Keep, self.show_hidden);
+                                }
+                                MenuAction::LeftFilter => {
+                                    self.status = "Filters not implemented".to_string();
+                                }
+                                MenuAction::LeftDrive => {
+                                    self.open_drive_menu(ActivePane::Left);
+                                    return Cmd::none();
+                                }
+                                // Right panel view modes
+                                MenuAction::RightBrief => {
+                                    self.right.mode = PanelMode::Brief;
+                                }
+                                MenuAction::RightFull => {
+                                    self.right.mode = PanelMode::Full;
+                                }
+                                MenuAction::RightInfo => {
+                                    self.right.mode = PanelMode::Info;
+                                }
+                                MenuAction::RightTree => {
+                                    self.right.mode = PanelMode::Tree;
+                                }
+                                MenuAction::RightQuickView => {
+                                    self.right.mode = PanelMode::QuickView;
+                                }
+                                MenuAction::RightOnOff => {
+                                    self.hide_right = !self.hide_right;
+                                    if self.hide_right && self.active == ActivePane::Right {
+                                        self.active = ActivePane::Left;
+                                    }
+                                }
+                                // Right panel sort modes
                                 MenuAction::RightSortName => {
                                     self.right.sort_mode = toggle_name_sort(self.right.sort_mode);
+                                    let _ = self.right.refresh(RefreshMode::Keep, self.show_hidden);
+                                }
+                                MenuAction::RightSortExt => {
+                                    self.right.sort_mode = toggle_ext_sort(self.right.sort_mode);
                                     let _ = self.right.refresh(RefreshMode::Keep, self.show_hidden);
                                 }
                                 MenuAction::RightSortTime => {
                                     self.right.sort_mode = toggle_time_sort(self.right.sort_mode);
                                     let _ = self.right.refresh(RefreshMode::Keep, self.show_hidden);
                                 }
+                                MenuAction::RightSortSize => {
+                                    self.right.sort_mode = toggle_size_sort(self.right.sort_mode);
+                                    let _ = self.right.refresh(RefreshMode::Keep, self.show_hidden);
+                                }
+                                MenuAction::RightUnsorted => {
+                                    self.right.sort_mode = SortMode::Unsorted;
+                                    let _ = self.right.refresh(RefreshMode::Keep, self.show_hidden);
+                                }
+                                // Right panel other actions
+                                MenuAction::RightReread => {
+                                    let _ = self.right.refresh(RefreshMode::Keep, self.show_hidden);
+                                }
+                                MenuAction::RightFilter => {
+                                    self.status = "Filters not implemented".to_string();
+                                }
+                                MenuAction::RightDrive => {
+                                    self.open_drive_menu(ActivePane::Right);
+                                    return Cmd::none();
+                                }
                                 MenuAction::Help => {
-                                    self.modal = Some(Modal::Help);
+                                    self.modal = Some(Modal::Help { page: 0, scroll: 0 });
                                     return Cmd::none();
                                 }
                                 MenuAction::About => {
@@ -1035,6 +1308,235 @@ impl App {
                     _ => self.modal = Some(modal),
                 }
             }
+            Modal::CopyDialog(_) => {
+                return self.handle_copy_move_dialog_key(key, modal, true);
+            }
+            Modal::MoveDialog(_) => {
+                return self.handle_copy_move_dialog_key(key, modal, false);
+            }
+            Modal::DeleteDialog { sources, use_filters, focus, .. } => {
+                match key.code {
+                    KeyCode::Escape => self.modal = None,
+                    KeyCode::Tab => {
+                        // Cycle through: 0=checkbox, 1=Delete, 2=Filters, 3=Cancel
+                        *focus = (*focus + 1) % 4;
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::BackTab => {
+                        *focus = if *focus == 0 { 3 } else { *focus - 1 };
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::Char(' ') if *focus == 0 => {
+                        *use_filters = !*use_filters;
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::Enter => {
+                        match *focus {
+                            0 => {
+                                // Toggle checkbox
+                                *use_filters = !*use_filters;
+                                self.modal = Some(modal);
+                            }
+                            1 => {
+                                // Delete button
+                                let sources_clone = sources.clone();
+                                self.modal = None;
+                                self.execute_confirm(PendingConfirm::Delete { sources: sources_clone });
+                            }
+                            2 => {
+                                // Filters button (not implemented yet)
+                                self.status = "Filters not implemented".to_string();
+                                self.modal = Some(modal);
+                            }
+                            3 => {
+                                // Cancel
+                                self.modal = None;
+                            }
+                            _ => self.modal = Some(modal),
+                        }
+                    }
+                    _ => self.modal = Some(modal),
+                }
+            }
+        }
+        Cmd::none()
+    }
+
+    fn handle_copy_move_dialog_key(&mut self, key: KeyEvent, mut modal: Modal, is_copy: bool) -> Cmd<Msg> {
+        let state = match &mut modal {
+            Modal::CopyDialog(s) | Modal::MoveDialog(s) => s,
+            _ => {
+                self.modal = Some(modal);
+                return Cmd::none();
+            }
+        };
+
+        match key.code {
+            KeyCode::Escape => {
+                self.modal = None;
+            }
+            KeyCode::Tab => {
+                // Cycle through focus elements
+                state.focus = match state.focus {
+                    CopyDialogFocus::Input => CopyDialogFocus::IncludeSubdirs,
+                    CopyDialogFocus::IncludeSubdirs => CopyDialogFocus::CopyNewerOnly,
+                    CopyDialogFocus::CopyNewerOnly => CopyDialogFocus::UseFilters,
+                    CopyDialogFocus::UseFilters => CopyDialogFocus::CheckTargetSpace,
+                    CopyDialogFocus::CheckTargetSpace => CopyDialogFocus::BtnCopy,
+                    CopyDialogFocus::BtnCopy => CopyDialogFocus::BtnTree,
+                    CopyDialogFocus::BtnTree => CopyDialogFocus::BtnFilters,
+                    CopyDialogFocus::BtnFilters => CopyDialogFocus::BtnCancel,
+                    CopyDialogFocus::BtnCancel => CopyDialogFocus::Input,
+                };
+                self.modal = Some(modal);
+            }
+            KeyCode::BackTab => {
+                state.focus = match state.focus {
+                    CopyDialogFocus::Input => CopyDialogFocus::BtnCancel,
+                    CopyDialogFocus::IncludeSubdirs => CopyDialogFocus::Input,
+                    CopyDialogFocus::CopyNewerOnly => CopyDialogFocus::IncludeSubdirs,
+                    CopyDialogFocus::UseFilters => CopyDialogFocus::CopyNewerOnly,
+                    CopyDialogFocus::CheckTargetSpace => CopyDialogFocus::UseFilters,
+                    CopyDialogFocus::BtnCopy => CopyDialogFocus::CheckTargetSpace,
+                    CopyDialogFocus::BtnTree => CopyDialogFocus::BtnCopy,
+                    CopyDialogFocus::BtnFilters => CopyDialogFocus::BtnTree,
+                    CopyDialogFocus::BtnCancel => CopyDialogFocus::BtnFilters,
+                };
+                self.modal = Some(modal);
+            }
+            KeyCode::Char(' ') => {
+                // Toggle checkbox if focused on one
+                match state.focus {
+                    CopyDialogFocus::IncludeSubdirs => state.include_subdirs = !state.include_subdirs,
+                    CopyDialogFocus::CopyNewerOnly => state.copy_newer_only = !state.copy_newer_only,
+                    CopyDialogFocus::UseFilters => state.use_filters = !state.use_filters,
+                    CopyDialogFocus::CheckTargetSpace => state.check_target_space = !state.check_target_space,
+                    CopyDialogFocus::Input => {
+                        state.dest.insert(state.cursor, ' ');
+                        state.cursor += 1;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(modal);
+            }
+            KeyCode::Enter => {
+                match state.focus {
+                    CopyDialogFocus::Input | CopyDialogFocus::BtnCopy => {
+                        // Execute copy/move
+                        let sources = state.sources.clone();
+                        let dest = PathBuf::from(&state.dest);
+                        self.modal = None;
+
+                        if is_copy {
+                            if let Some(conflicts) = find_conflicts(&sources, &dest) {
+                                self.modal = Some(Modal::Confirm {
+                                    title: "Overwrite".to_string(),
+                                    message: format!("Overwrite {} item(s)?", conflicts),
+                                    action: PendingConfirm::Overwrite {
+                                        kind: OverwriteKind::Copy,
+                                        sources,
+                                        dest,
+                                    },
+                                });
+                                return Cmd::none();
+                            }
+                            let show_hidden = self.show_hidden;
+                            match copy_sources(&sources, &dest, false) {
+                                Ok(()) => {
+                                    self.status = "Copy complete".to_string();
+                                    let _ = self.inactive_pane_mut().refresh(RefreshMode::Keep, show_hidden);
+                                }
+                                Err(err) => {
+                                    self.status = format!("Copy failed: {err}");
+                                }
+                            }
+                        } else {
+                            if let Some(conflicts) = find_conflicts(&sources, &dest) {
+                                self.modal = Some(Modal::Confirm {
+                                    title: "Overwrite".to_string(),
+                                    message: format!("Overwrite {} item(s)?", conflicts),
+                                    action: PendingConfirm::Overwrite {
+                                        kind: OverwriteKind::Move,
+                                        sources,
+                                        dest,
+                                    },
+                                });
+                                return Cmd::none();
+                            }
+                            let show_hidden = self.show_hidden;
+                            match move_sources(&sources, &dest, false) {
+                                Ok(()) => {
+                                    self.status = "Move complete".to_string();
+                                    let _ = self.active_pane_mut().refresh(RefreshMode::Keep, show_hidden);
+                                    let _ = self.inactive_pane_mut().refresh(RefreshMode::Keep, show_hidden);
+                                }
+                                Err(err) => {
+                                    self.status = format!("Move failed: {err}");
+                                }
+                            }
+                        }
+                    }
+                    CopyDialogFocus::IncludeSubdirs => state.include_subdirs = !state.include_subdirs,
+                    CopyDialogFocus::CopyNewerOnly => state.copy_newer_only = !state.copy_newer_only,
+                    CopyDialogFocus::UseFilters => state.use_filters = !state.use_filters,
+                    CopyDialogFocus::CheckTargetSpace => state.check_target_space = !state.check_target_space,
+                    CopyDialogFocus::BtnTree => {
+                        self.status = "Tree browser not implemented".to_string();
+                        self.modal = Some(modal);
+                        return Cmd::none();
+                    }
+                    CopyDialogFocus::BtnFilters => {
+                        self.status = "Filters not implemented".to_string();
+                        self.modal = Some(modal);
+                        return Cmd::none();
+                    }
+                    CopyDialogFocus::BtnCancel => {
+                        self.modal = None;
+                    }
+                }
+                if self.modal.is_some() {
+                    self.modal = Some(modal);
+                }
+            }
+            KeyCode::Left if state.focus == CopyDialogFocus::Input => {
+                if state.cursor > 0 {
+                    state.cursor -= 1;
+                }
+                self.modal = Some(modal);
+            }
+            KeyCode::Right if state.focus == CopyDialogFocus::Input => {
+                if state.cursor < state.dest.len() {
+                    state.cursor += 1;
+                }
+                self.modal = Some(modal);
+            }
+            KeyCode::Backspace if state.focus == CopyDialogFocus::Input => {
+                if state.cursor > 0 {
+                    state.cursor -= 1;
+                    state.dest.remove(state.cursor);
+                }
+                self.modal = Some(modal);
+            }
+            KeyCode::Delete if state.focus == CopyDialogFocus::Input => {
+                if state.cursor < state.dest.len() {
+                    state.dest.remove(state.cursor);
+                }
+                self.modal = Some(modal);
+            }
+            KeyCode::Char(ch) if state.focus == CopyDialogFocus::Input => {
+                state.dest.insert(state.cursor, ch);
+                state.cursor += 1;
+                self.modal = Some(modal);
+            }
+            KeyCode::Home if state.focus == CopyDialogFocus::Input => {
+                state.cursor = 0;
+                self.modal = Some(modal);
+            }
+            KeyCode::End if state.focus == CopyDialogFocus::Input => {
+                state.cursor = state.dest.len();
+                self.modal = Some(modal);
+            }
+            _ => self.modal = Some(modal),
         }
         Cmd::none()
     }
@@ -1262,7 +1764,7 @@ impl App {
             return;
         }
 
-        let (layout_cache, status_area, key_area) = render_layout(
+        let (layout_cache, status_area, cmdline_area, key_area) = render_layout(
             frame,
             self.theme,
             &self.left,
@@ -1280,12 +1782,14 @@ impl App {
         render_status_and_keybar(
             frame,
             status_area,
+            cmdline_area,
             key_area,
             self.theme,
             &self.left,
             &self.right,
             self.active,
             &self.status,
+            &self.cmdline,
         );
 
         if let Some(modal) = &self.modal {

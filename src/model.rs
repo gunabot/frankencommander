@@ -23,12 +23,28 @@ pub enum ActivePane {
     Right,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortMode {
+    #[default]
     NameAsc,
     NameDesc,
+    ExtAsc,
+    ExtDesc,
     TimeAsc,
     TimeDesc,
+    SizeAsc,
+    SizeDesc,
+    Unsorted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelMode {
+    Brief,
+    #[default]
+    Full,
+    Info,
+    Tree,
+    QuickView,
 }
 
 #[derive(Debug, Clone)]
@@ -81,8 +97,42 @@ pub enum PendingConfirm {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyDialogFocus {
+    Input,
+    IncludeSubdirs,
+    CopyNewerOnly,
+    UseFilters,
+    CheckTargetSpace,
+    BtnCopy,
+    BtnTree,
+    BtnFilters,
+    BtnCancel,
+}
+
+#[derive(Debug, Clone)]
+pub struct CopyDialogState {
+    pub sources: Vec<PathBuf>,
+    pub source_name: String,
+    pub dest: String,
+    pub cursor: usize,
+    pub include_subdirs: bool,
+    pub copy_newer_only: bool,
+    pub use_filters: bool,
+    pub check_target_space: bool,
+    pub focus: CopyDialogFocus,
+}
+
 #[derive(Debug, Clone)]
 pub enum Modal {
+    CopyDialog(CopyDialogState),
+    MoveDialog(CopyDialogState),
+    DeleteDialog {
+        sources: Vec<PathBuf>,
+        source_name: String,
+        use_filters: bool,
+        focus: usize, // 0=checkbox, 1=Delete, 2=Filters, 3=Cancel
+    },
     Prompt {
         title: String,
         label: String,
@@ -114,8 +164,12 @@ pub enum Modal {
         scroll: usize,
     },
     Config {
+        page: usize,      // 0=Screen, 1=Panel Options, 2=Confirmations
         selected: usize,
         show_hidden: bool,
+        auto_save: bool,
+        confirm_delete: bool,
+        confirm_overwrite: bool,
     },
     PanelOptions {
         pane: ActivePane,
@@ -130,7 +184,10 @@ pub enum Modal {
         config_path: PathBuf,
     },
     About,
-    Help,
+    Help {
+        page: usize,  // 0=Overview, 1=Keys, 2=Panels, 3=Files
+        scroll: usize,
+    },
     PullDown {
         menu_idx: usize,
         item_idx: usize,
@@ -162,10 +219,36 @@ pub enum MenuAction {
     Find,
     Config,
     PanelOptions,
+    // Left panel actions
+    LeftBrief,
+    LeftFull,
+    LeftInfo,
+    LeftTree,
+    LeftQuickView,
+    LeftOnOff,
     LeftSortName,
+    LeftSortExt,
     LeftSortTime,
+    LeftSortSize,
+    LeftUnsorted,
+    LeftReread,
+    LeftFilter,
+    LeftDrive,
+    // Right panel actions
+    RightBrief,
+    RightFull,
+    RightInfo,
+    RightTree,
+    RightQuickView,
+    RightOnOff,
     RightSortName,
+    RightSortExt,
     RightSortTime,
+    RightSortSize,
+    RightUnsorted,
+    RightReread,
+    RightFilter,
+    RightDrive,
     Help,
     About,
 }
@@ -174,6 +257,9 @@ pub enum MenuAction {
 pub struct MenuItem {
     pub label: &'static str,
     pub action: MenuAction,
+    pub shortcut: Option<&'static str>,
+    pub checked: Option<bool>,
+    pub separator_after: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +290,7 @@ pub struct Pane {
     pub dirs_first: bool,
     pub vfs: Option<VfsState>,
     pub panelized: Option<Vec<PathBuf>>,
+    pub mode: PanelMode,
 }
 
 impl Pane {
@@ -217,6 +304,7 @@ impl Pane {
             dirs_first: true,
             vfs: None,
             panelized: None,
+            mode: PanelMode::default(),
         }
     }
 }
